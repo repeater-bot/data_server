@@ -15,8 +15,8 @@
 
 ## 环境要求
 
-- Python `>=3.11,<4.0`（代码使用了 `StrEnum`）
-- [Poetry](https://python-poetry.org/)（`poetry.toml` 已配置虚拟环境建在项目内 `.venv`）
+- Python `>=3.11,<4.0`
+- [Poetry](https://python-poetry.org/)
 
 ## 安装
 
@@ -26,22 +26,22 @@ cd data-server
 poetry install
 ```
 
-如果仓库里已经带有 `.venv`，也可以直接使用：
-
-```powershell
-.venv\Scripts\python.exe -V
-```
-
 ## 快速开始
 
 ```bash
 poetry run python file_server.py
 ```
 
-Windows 下直接使用虚拟环境：
+直接使用虚拟环境：
 
 ```powershell
-.venv\Scripts\python.exe file_server.py
+./.venv/Scripts/python.exe file_server.py
+```
+
+or
+
+```bash
+.venv/bin/python3 file_server.py
 ```
 
 启动后读取当前目录下的 `configs/*.json`：
@@ -50,16 +50,13 @@ Windows 下直接使用虚拟环境：
 - 只有一个 JSON 文件：直接使用
 - 有多个 JSON 文件：打印列表并提示选择序号
 
-仓库自带的 `configs/config.json` 监听 `http://127.0.0.1:4572`，
-虚拟化根目录为 `./static`。
-
 ## 配置文件
 
 ```json
 {
-    "host": "127.0.0.1",
-    "port": 4572,
-    "base_path": "./static",
+    "host": "0.0.0.0",
+    "port": 8000,
+    "base_path": "./workspace",
     "cache_size": 128,
     "cache_ttl": 60,
     "logger": {
@@ -73,6 +70,9 @@ Windows 下直接使用虚拟环境：
     }
 }
 ```
+
+以上是内置默认值。`configs/` 是本地运行时目录（已在 `.gitignore` 中忽略），
+首次启动会自动生成 `default.json`，实际部署按需覆盖。
 
 | 字段 | 说明 |
 | --- | --- |
@@ -194,38 +194,27 @@ Windows 下直接使用虚拟环境：
 
 ```bash
 # 读取图片
-curl http://127.0.0.1:4572/operations/read/images/photo.jpg -o photo.jpg
+curl http://127.0.0.1:8000/operations/read/images/photo.jpg -o photo.jpg
 
 # 以文本读取
-curl "http://127.0.0.1:4572/operations/read/README.md?text_encoding=utf-8"
+curl "http://127.0.0.1:8000/operations/read/README.md?text_encoding=utf-8"
 
 # 列根目录
-curl http://127.0.0.1:4572/operations/list/
+curl http://127.0.0.1:8000/operations/list/
 
 # 查文件信息
-curl http://127.0.0.1:4572/operations/info/images/photo.jpg
+curl http://127.0.0.1:8000/operations/info/images/photo.jpg
 
 # 上传（目标不存在会自动创建）
 curl -X POST -F "file=@photo.jpg" \
-    http://127.0.0.1:4572/operations/write/images/photo.jpg
+    http://127.0.0.1:8000/operations/write/images/photo.jpg
 
 # 删除文件
-curl -X DELETE http://127.0.0.1:4572/operations/delete/images/photo.jpg
+curl -X DELETE http://127.0.0.1:8000/operations/delete/images/photo.jpg
 
 # 递归删除目录
-curl -X DELETE "http://127.0.0.1:4572/operations/delete/images?recursive=true"
+curl -X DELETE "http://127.0.0.1:8000/operations/delete/images?recursive=true"
 ```
-
-## 测试
-
-测试位于 `tests/`，只依赖标准库和项目已有运行时依赖，不需要 pytest：
-
-```powershell
-.venv\Scripts\python.exe -m unittest discover -v
-```
-
-当前共 165 个用例；接口契约、已修复缺陷和仍存在的非接口问题见
-[`tests/KNOWN_ISSUES.md`](tests/KNOWN_ISSUES.md)。
 
 ## 项目结构
 
@@ -237,17 +226,15 @@ data_server/
 ├── lifespan/       # 启动/退出钩子与 post-init
 ├── logger_init/    # loguru 与标准库 logging 接线
 └── server/         # ResourceServer、异常处理、uvicorn 启动
-configs/            # 运行时配置
+configs/            # 运行时配置（首次启动生成，不入库）
 file_server.py      # 入口脚本
-tests/              # 单元测试
 ```
 
 ## 安全说明
 
 - 路径通过索引查找，`..` 之类的路径段只是普通键名，不会逃出 `base_path`。
-- 服务本身**不带鉴权**。`Configs` 的内置默认监听 `0.0.0.0`，仓库自带的
-  `configs/config.json` 监听 `127.0.0.1`；若要对外提供服务，请在前面加
-  反向代理并配置访问控制。
+- 服务本身**不带鉴权**。`Configs` 的内置默认监听 `0.0.0.0`；实际部署建议
+  改为只监听 `127.0.0.1`，或在前面加反向代理并配置访问控制。
 
 ## 许可证
 
