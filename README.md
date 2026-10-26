@@ -12,6 +12,9 @@
 - ✍️ **写入即创建** — 目标不存在时自动创建节点和中间目录
 - 🗑️ **删除** — 支持删除文件、空目录或递归删除整个目录
 - 🔎 **存在检查** — 不读取内容即可判断路径是文件、目录还是不存在
+- 🔍 **路径扫描** — `glob` / `rglob` 按模式返回完整虚拟路径
+- 🌲 **递归列表** — `rlist` 一次列出指定目录下的全部后代路径
+- 🧩 **正则匹配** — `rematch` 用 Python `re` 判断单个虚拟路径是否命中
 - 🔧 **配置管理** — JSON 配置文件，支持多配置选择
 - 🚀 **简单易用** — 一条命令启动，自带 OpenAPI 文档
 
@@ -168,6 +171,87 @@ or
 | 目录（含根路径 `/operations/exists/`） | 200 | `{"exists": true, "type": "directory"}` |
 | 不存在 | 200 | `{"exists": false, "type": null}` |
 
+### `GET /operations/glob/{path}`
+
+在 `path` 目录下按模式扫描，返回**相对工作区根目录的完整虚拟路径**。
+
+| 参数 | 位置 | 说明 |
+| --- | --- | --- |
+| `path` | path | 扫描的起始目录；根目录用 `/operations/glob/` |
+| `pattern` | query | 必填，glob 模式，例如 `*.md`、`sub/*.md`、`**/*.md` |
+
+- `*` / `?` / `[...]` 只匹配单个路径段；`**` 可以跨任意层目录。
+- 裸模式（不含 `/` 和 `**`）只匹配起始目录的直接子项。
+- 结果是 JSON 数组，元素是完整虚拟路径，包含匹配到的目录。
+
+```bash
+curl "http://127.0.0.1:8000/operations/glob/docs?pattern=*.md"
+# ["docs/a.md"]
+
+curl "http://127.0.0.1:8000/operations/glob/docs?pattern=sub/*.md"
+# ["docs/sub/c.md"]
+```
+
+### `GET /operations/rglob/{path}`
+
+与 `glob` 相同的参数，但等价于 `glob` 的 `**/<pattern>`，会递归扫描整个子树。
+
+```bash
+curl "http://127.0.0.1:8000/operations/rglob/docs?pattern=*.md"
+# ["docs/a.md", "docs/sub/c.md", "docs/sub/deep/d.md"]
+```
+
+| 情况 | 状态码 | 响应 |
+| --- | --- | --- |
+| 正常扫描 | 200 | 路径数组，`Content-Type: application/json` |
+| 起始路径不存在 | 404 | `{"detail": "Directory <path> not found"}` |
+| 起始路径是文件 | 400 | `{"detail": "<path> is not a directory"}` |
+| `pattern` 为空或全是 `/` | 400 | `{"detail": "pattern must not be empty"}` |
+| 缺少 `pattern` | 422 | FastAPI 标准校验错误 |
+
+### `GET /operations/rlist/{path}`
+
+递归列出 `path` 下所有后代路径，文件和目录都包含，不含 `path` 自身。
+根路径用 `/operations/rlist/`。
+
+```bash
+curl http://127.0.0.1:8000/operations/rlist/docs
+# ["docs/a.md", "docs/sub", "docs/sub/c.md"]
+```
+
+| 情况 | 状态码 | 响应 |
+| --- | --- | --- |
+| 正常列表 | 200 | 完整虚拟路径数组，`Content-Type: application/json` |
+| 起始路径不存在 | 404 | `{"detail": "Directory <path> not found"}` |
+| 起始路径是文件 | 400 | `{"detail": "<path> is not a directory"}` |
+
+> `glob` / `rglob` / `rlist` 的索引遍历，以及递归删除时的子树收集，
+> 都在线程池中执行（`asyncio.to_thread`），不会长时间占用事件循环。
+
+### `GET /operations/rematch/{path}`
+
+用正则表达式匹配单条虚拟路径。
+
+| 参数 | 位置 | 说明 |
+| --- | --- | --- |
+| `path` | path | 要匹配的虚拟路径 |
+| `pattern` | query | 必填，Python `re` 语法；使用 `re.search`，不要求从开头匹配 |
+
+只做字符串匹配，**不检查路径是否真实存在**。
+
+```bash
+curl -G --data-urlencode "pattern=\\.md$" \
+    http://127.0.0.1:8000/operations/rematch/docs/a.md
+# {"matched": true, "path": "docs/a.md"}
+```
+
+| 情况 | 状态码 | 响应 |
+| --- | --- | --- |
+| 命中 / 不命中 | 200 | `{"matched": true/false, "path": "<path>"}` |
+| `pattern` 为空 | 400 | `{"detail": "pattern must not be empty"}` |
+| 无效正则 | 400 | `{"detail": "Invalid regular expression: ..."}` |
+| 缺少 `pattern` | 422 | FastAPI 标准校验错误 |
+
 ### `POST /operations/write/{path}`
 
 写入文件。请求体为 `multipart/form-data`，文件字段名必须是 `file`。
@@ -226,6 +310,19 @@ curl http://127.0.0.1:8000/operations/info/images/photo.jpg
 # 检查是否存在
 curl http://127.0.0.1:8000/operations/exists/images/photo.jpg
 
+# 当前层扫描
+curl "http://127.0.0.1:8000/operations/glob/images?pattern=*.jpg"
+
+# 递归扫描
+curl "http://127.0.0.1:8000/operations/rglob/?pattern=*.md"
+
+# 递归列出全部后代
+curl http://127.0.0.1:8000/operations/rlist/docs
+
+# 正则匹配单条路径
+curl -G --data-urlencode "pattern=\\.md$" \
+    http://127.0.0.1:8000/operations/rematch/docs/a.md
+
 # 上传（目标不存在会自动创建）
 curl -X POST -F "file=@photo.jpg" \
     http://127.0.0.1:8000/operations/write/images/photo.jpg
@@ -241,7 +338,7 @@ curl -X DELETE "http://127.0.0.1:8000/operations/delete/images?recursive=true"
 
 ```
 data_server/
-├── app/            # HTTP 端点（read / write / delete / list / info）
+├── app/            # HTTP 端点
 ├── configs/        # pydantic 配置模型
 ├── file_manager/   # 虚拟索引与文件存储
 ├── lifespan/       # 启动/退出钩子与 post-init
