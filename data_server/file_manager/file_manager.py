@@ -1,6 +1,7 @@
 import os
 import io
 import uuid
+import fnmatch
 import orjson
 import asyncio
 import aiofiles
@@ -266,6 +267,112 @@ class FileManager:
             return None
         return "file" if is_file(node) else "directory"
 
+    @staticmethod
+    def _compile_glob(pattern: str) -> tuple[str, ...]:
+        """Split a glob pattern once; the result is reused for every path."""
+        return tuple(part for part in pattern.split("/") if part)
+
+    @staticmethod
+    def _match_glob_parts(
+        path_parts: list[str],
+        pattern_parts: tuple[str, ...],
+    ) -> bool:
+        """Match already-split path parts against compiled glob parts."""
+        if not pattern_parts:
+            return False
+
+        def match(
+            path_parts: list[str],
+            pattern_parts: tuple[str, ...]
+        ) -> bool:
+            if not pattern_parts:
+                return not path_parts
+            head = pattern_parts[0]
+            rest = pattern_parts[1:]
+            if head == "**":
+                # ``**`` matches zero or more path segments.
+                if match(path_parts, rest):
+                    return True
+                return bool(path_parts) and match(path_parts[1:], pattern_parts)
+            if not path_parts:
+                return False
+            return (
+                fnmatch.fnmatchcase(path_parts[0], head)
+                and match(path_parts[1:], rest)
+            )
+
+        return match(path_parts, pattern_parts)
+
+    def _match_paths_sync(self, path: str, pattern: str) -> list[str]:
+        """Pure index traversal; run this in a worker thread."""
+        pattern_parts = self._compile_glob(pattern)
+        base_path = [note for note in path.split("/") if note]
+        node: Nodes = self.root_node
+        for note in base_path:
+            if not has_sub_items_notes(node):
+                raise NotADirectoryError(f"{path} is not a directory")
+            child = node.sub_items.get(note)
+            if child is None:
+                raise FileNotFoundError(f"Directory {path} not found")
+            node = child
+        if not is_dir(node):
+            raise NotADirectoryError(f"{path} is not a directory")
+        base_node: DirNode = node
+
+        results: list[str] = []
+        # A bare pattern can only match direct children; avoid walking the
+        # whole subtree for the common ``glob("*")`` case.
+        if len(pattern_parts) == 1 and pattern_parts[0] != "**":
+            name_pattern = pattern_parts[0]
+            for name in base_node.sub_items:
+                if fnmatch.fnmatchcase(name, name_pattern):
+                    results.append("/".join(base_path + [name]))
+            return sorted(results)
+
+        def walk(node: DirNode, relative: list[str]) -> None:
+            for name, child in node.sub_items.items():
+                child_relative = relative + [name]
+                if self._match_glob_parts(child_relative, pattern_parts):
+                    results.append("/".join(base_path + child_relative))
+                if is_dir(child):
+                    walk(child, child_relative)
+
+        walk(base_node, [])
+        return sorted(results)
+
+    async def _match_paths(self, path: str, pattern: str) -> list[str]:
+        if not pattern.strip("/"):
+            raise ValueError("pattern must not be empty")
+        pattern = pattern.lstrip("/")
+
+        async with self._index_lock:
+            # The walk is CPU-bound and may be large; keep it off the event
+            # loop while the index lock still guards against mutations.
+            return await asyncio.to_thread(
+                self._match_paths_sync,
+                path,
+                pattern
+            )
+
+    async def glob(self, path: str, pattern: str) -> list[str]:
+        """Return virtual paths under ``path`` matching ``pattern``.
+
+        ``*`` / ``?`` / ``[...]`` match within one path segment; ``**``
+        matches any number of segments.  Results are full virtual paths
+        relative to the workspace root.
+        """
+        return await self._match_paths(path, pattern)
+
+    async def rglob(self, path: str, pattern: str) -> list[str]:
+        """Recursively match ``pattern`` below ``path``."""
+        if not pattern.strip("/"):
+            raise ValueError("pattern must not be empty")
+        return await self._match_paths(path, f"**/{pattern.lstrip('/')}")
+
+    async def rlist(self, path: str) -> list[str]:
+        """Return all descendant virtual paths below ``path``."""
+        return await self._match_paths(path, "**")
+
     async def read(self, path: str) -> bytes:
         node = await self._find_node(path)
         if node is None:
@@ -340,7 +447,10 @@ class FileManager:
             if is_dir(node) and node.sub_items and not recursive:
                 raise DirectoryNotEmptyError(f"Directory {path} is not empty")
 
-            file_ids, dir_count = self._collect_deletions(node)
+            file_ids, dir_count = await asyncio.to_thread(
+                self._collect_deletions,
+                node
+            )
             del parent.sub_items[name]
             await self._write_index_locked()
 
