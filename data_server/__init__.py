@@ -3,6 +3,7 @@ from .app import (
     read_file as _get_file,
     write_file as _write_file,
     delete_file as _delete_file,
+    exists as _exists,
     list_dir as _list_dir,
     get_info as _get_info
 )

@@ -109,7 +109,14 @@ class FileManager:
         return self.root_dir / "index.json"
 
     def _file_path(self, file_id: uuid.UUID) -> Path:
-        return self.root_dir / "files" / f"{file_id}.bin"
+        hex_id = file_id.hex
+        return (
+            self.root_dir
+            / "files"
+            / hex_id[:2]
+            / hex_id[2:4]
+            / f"{hex_id}.bin"
+        )
 
     async def _write_index_locked(self) -> None:
         """Write ``index.json``; the caller must hold ``_index_lock``."""
@@ -208,8 +215,7 @@ class FileManager:
     ) -> int:
         async with self._file_lock:
             path = self._file_path(id)
-            if not path.parent.exists():
-                path.parent.mkdir(parents=True)
+            path.parent.mkdir(parents=True, exist_ok=True)
             async with aiofiles.open(path, "wb") as f:
                 return await f.write(data)
 
@@ -220,8 +226,7 @@ class FileManager:
     ) -> None:
         async with self._file_lock:
             path = self._file_path(id)
-            if not path.parent.exists():
-                path.parent.mkdir(parents=True)
+            path.parent.mkdir(parents=True, exist_ok=True)
             async with aiofiles.open(path, "ab") as f:
                 await f.write(data)
 
@@ -245,6 +250,7 @@ class FileManager:
             new_file_id = self._gen_file_id()
             scr_file_path = self._file_path(id)
             dst_file_path = self._file_path(new_file_id)
+            dst_file_path.parent.mkdir(parents=True, exist_ok=True)
             async with aiofiles.open(scr_file_path, "rb") as f:
                 async with aiofiles.open(dst_file_path, "wb") as new_f:
                     await self._copy_range(f, new_f, 0, start, chunk_size = copy_chunk_size)
@@ -252,6 +258,13 @@ class FileManager:
                     await self._copy_range(f, new_f, end, chunk_size = copy_chunk_size)
             scr_file_path.unlink()
             return new_file_id
+
+    async def get_node_type(self, path: str) -> str | None:
+        """Return ``"file"``, ``"directory"`` or ``None`` for a virtual path."""
+        node = await self._find_node(path)
+        if node is None:
+            return None
+        return "file" if is_file(node) else "directory"
 
     async def read(self, path: str) -> bytes:
         node = await self._find_node(path)

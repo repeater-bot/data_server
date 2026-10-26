@@ -1,7 +1,8 @@
 # Data Server
 
 一个基于 FastAPI 的虚拟文件服务器：把 `base_path` 目录映射成 HTTP API，
-用 `index.json` 维护虚拟目录树，文件内容单独存放在 `files/<uuid>.bin` 中。
+用 `index.json` 维护虚拟目录树，文件内容按 UUID 分片存放在
+`files/<xx>/<yy>/<uuid>.bin` 中。
 客户端只能访问索引里登记过的路径，不会直接接触真实文件系统。
 
 ## 功能特点
@@ -10,6 +11,7 @@
 - 📂 **虚拟目录** — 特殊目录结构不会触发文件系统的特殊行为
 - ✍️ **写入即创建** — 目标不存在时自动创建节点和中间目录
 - 🗑️ **删除** — 支持删除文件、空目录或递归删除整个目录
+- 🔎 **存在检查** — 不读取内容即可判断路径是文件、目录还是不存在
 - 🔧 **配置管理** — JSON 配置文件，支持多配置选择
 - 🚀 **简单易用** — 一条命令启动，自带 OpenAPI 文档
 
@@ -90,10 +92,15 @@ or
 
 ```
 <base_path>/
-├── index.json          # 虚拟目录树（FileNode / DirNode）
+├── index.json              # 虚拟目录树（FileNode / DirNode）
 └── files/
-    └── <uuid>.bin      # 文件内容，按索引中的 UUID 命名
+    └── <xx>/
+        └── <yy>/
+            └── <uuid>.bin  # 文件内容，按索引 UUID 分片存放
 ```
+
+`<xx>` / `<yy>` 是 UUID 十六进制的前 2 位和第 3-4 位，用 256×256 个子目录
+分散文件，避免单个目录堆积过多文件。数据文件始终按分片路径存放。
 
 `index.json` 不存在时，首次启动会自动创建空索引；通过 HTTP 写入新路径时，
 服务会自动创建缺失的节点与中间目录，并更新索引。
@@ -151,6 +158,16 @@ or
 | 路径不存在 | 404 | `{"detail": "File <path> not found"}` |
 | 路径是目录 | 400 | `{"detail": "<path> is a directory"}` |
 
+### `GET /operations/exists/{path}`
+
+检查虚拟路径是否存在，不读取文件内容。路径不存在不是错误，也返回 200。
+
+| 情况 | 状态码 | 响应 |
+| --- | --- | --- |
+| 文件 | 200 | `{"exists": true, "type": "file"}` |
+| 目录（含根路径 `/operations/exists/`） | 200 | `{"exists": true, "type": "directory"}` |
+| 不存在 | 200 | `{"exists": false, "type": null}` |
+
 ### `POST /operations/write/{path}`
 
 写入文件。请求体为 `multipart/form-data`，文件字段名必须是 `file`。
@@ -182,8 +199,9 @@ or
 | 路径不存在 | 404 | `{"detail": "File <path> not found"}` |
 | 删除根目录 | 403 | `{"detail": "Cannot delete the root directory"}` |
 
-删除会同时移除 `index.json` 中的节点和对应的 `files/<uuid>.bin`；
-数据文件已经丢失时仍可删除成功。递归删除返回的数量包含目标目录本身。
+删除会同时移除 `index.json` 中的节点和对应的数据文件
+（`files/<xx>/<yy>/<uuid>.bin`）；数据文件已经丢失时仍可删除成功。
+递归删除返回的数量包含目标目录本身。
 
 ### 错误响应
 
@@ -204,6 +222,9 @@ curl http://127.0.0.1:8000/operations/list/
 
 # 查文件信息
 curl http://127.0.0.1:8000/operations/info/images/photo.jpg
+
+# 检查是否存在
+curl http://127.0.0.1:8000/operations/exists/images/photo.jpg
 
 # 上传（目标不存在会自动创建）
 curl -X POST -F "file=@photo.jpg" \
