@@ -12,8 +12,8 @@
 - ✍️ **写入即创建** — 目标不存在时自动创建节点和中间目录
 - 🗑️ **删除** — 支持删除文件、空目录或递归删除整个目录
 - 🔎 **存在检查** — 不读取内容即可判断路径是文件、目录还是不存在
-- 🔍 **路径扫描** — `glob` / `rglob` 按模式返回完整虚拟路径
-- 🌲 **递归列表** — `rlist` 一次列出指定目录下的全部后代路径
+- 🔍 **路径扫描** — `glob`（`recursive=true` 递归）按模式返回完整虚拟路径
+- 🌲 **目录列表** — `list` 用 `recursive` 切换直接子项 / 递归后代路径
 - 🧩 **正则匹配** — `rematch` 用 Python `re` 判断单个虚拟路径是否命中
 - 🔧 **配置管理** — JSON 配置文件，支持多配置选择
 - 🚀 **简单易用** — 一条命令启动，自带 OpenAPI 文档
@@ -132,11 +132,24 @@ or
 
 ### `GET /operations/list/{path}`
 
-列出目录下的直接子项名称，返回 JSON 数组。根目录使用 `/operations/list/`。
+列出目录下的子项路径，返回完整虚拟路径数组。根目录使用 `/operations/list/`。
+
+| 参数 | 位置 | 说明 |
+| --- | --- | --- |
+| `path` | path | 虚拟目录路径；根目录用 `/operations/list/` |
+| `recursive` | query | 可选，默认 `false`；`true` 时递归列出所有后代路径 |
+
+```bash
+curl http://127.0.0.1:8000/operations/list/docs
+# ["docs/a.md", "docs/sub"]
+
+curl "http://127.0.0.1:8000/operations/list/docs?recursive=true"
+# ["docs/a.md", "docs/sub", "docs/sub/c.md"]
+```
 
 | 情况 | 状态码 | 响应 |
 | --- | --- | --- |
-| 目录（含根目录） | 200 | 名称数组，`Content-Type: application/json` |
+| 目录（含根目录） | 200 | 完整虚拟路径数组，`Content-Type: application/json` |
 | 路径不存在 | 404 | `{"detail": "Directory <path> not found"}` |
 | 路径是文件 | 400 | `{"detail": "<path> is not a directory"}` |
 
@@ -179,25 +192,18 @@ or
 | --- | --- | --- |
 | `path` | path | 扫描的起始目录；根目录用 `/operations/glob/` |
 | `pattern` | query | 必填，glob 模式，例如 `*.md`、`sub/*.md`、`**/*.md` |
+| `recursive` | query | 可选，默认 `false`；设为 `true` 时等价于 `**/<pattern>`，在任意深度匹配 |
 
 - `*` / `?` / `[...]` 只匹配单个路径段；`**` 可以跨任意层目录。
 - 裸模式（不含 `/` 和 `**`）只匹配起始目录的直接子项。
+- `recursive=true` 时自动在 `path` 下递归匹配。
 - 结果是 JSON 数组，元素是完整虚拟路径，包含匹配到的目录。
 
 ```bash
 curl "http://127.0.0.1:8000/operations/glob/docs?pattern=*.md"
 # ["docs/a.md"]
 
-curl "http://127.0.0.1:8000/operations/glob/docs?pattern=sub/*.md"
-# ["docs/sub/c.md"]
-```
-
-### `GET /operations/rglob/{path}`
-
-与 `glob` 相同的参数，但等价于 `glob` 的 `**/<pattern>`，会递归扫描整个子树。
-
-```bash
-curl "http://127.0.0.1:8000/operations/rglob/docs?pattern=*.md"
+curl "http://127.0.0.1:8000/operations/glob/docs?pattern=*.md&recursive=true"
 # ["docs/a.md", "docs/sub/c.md", "docs/sub/deep/d.md"]
 ```
 
@@ -209,23 +215,7 @@ curl "http://127.0.0.1:8000/operations/rglob/docs?pattern=*.md"
 | `pattern` 为空或全是 `/` | 400 | `{"detail": "pattern must not be empty"}` |
 | 缺少 `pattern` | 422 | FastAPI 标准校验错误 |
 
-### `GET /operations/rlist/{path}`
-
-递归列出 `path` 下所有后代路径，文件和目录都包含，不含 `path` 自身。
-根路径用 `/operations/rlist/`。
-
-```bash
-curl http://127.0.0.1:8000/operations/rlist/docs
-# ["docs/a.md", "docs/sub", "docs/sub/c.md"]
-```
-
-| 情况 | 状态码 | 响应 |
-| --- | --- | --- |
-| 正常列表 | 200 | 完整虚拟路径数组，`Content-Type: application/json` |
-| 起始路径不存在 | 404 | `{"detail": "Directory <path> not found"}` |
-| 起始路径是文件 | 400 | `{"detail": "<path> is not a directory"}` |
-
-> `glob` / `rglob` / `rlist` 的索引遍历，以及递归删除时的子树收集，
+> `glob` / `list` 的索引遍历，以及递归删除时的子树收集，
 > 都在线程池中执行（`asyncio.to_thread`），不会长时间占用事件循环。
 
 ### `GET /operations/rematch/{path}`
@@ -235,12 +225,12 @@ curl http://127.0.0.1:8000/operations/rlist/docs
 | 参数 | 位置 | 说明 |
 | --- | --- | --- |
 | `path` | path | 要匹配的虚拟路径 |
-| `pattern` | query | 必填，Python `re` 语法；使用 `re.search`，不要求从开头匹配 |
+| `pattern` | query | 必填，Python `re` 语法；使用 `re.match`，从路径开头匹配 |
 
 只做字符串匹配，**不检查路径是否真实存在**。
 
 ```bash
-curl -G --data-urlencode "pattern=\\.md$" \
+curl -G --data-urlencode "pattern=.*\\.md$" \
     http://127.0.0.1:8000/operations/rematch/docs/a.md
 # {"matched": true, "path": "docs/a.md"}
 ```
@@ -314,13 +304,13 @@ curl http://127.0.0.1:8000/operations/exists/images/photo.jpg
 curl "http://127.0.0.1:8000/operations/glob/images?pattern=*.jpg"
 
 # 递归扫描
-curl "http://127.0.0.1:8000/operations/rglob/?pattern=*.md"
+curl "http://127.0.0.1:8000/operations/glob/?pattern=*.md&recursive=true"
 
 # 递归列出全部后代
-curl http://127.0.0.1:8000/operations/rlist/docs
+curl "http://127.0.0.1:8000/operations/list/docs?recursive=true"
 
 # 正则匹配单条路径
-curl -G --data-urlencode "pattern=\\.md$" \
+curl -G --data-urlencode "pattern=.*\\.md$" \
     http://127.0.0.1:8000/operations/rematch/docs/a.md
 
 # 上传（目标不存在会自动创建）

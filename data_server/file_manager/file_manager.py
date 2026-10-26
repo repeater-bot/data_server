@@ -354,24 +354,24 @@ class FileManager:
                 pattern
             )
 
-    async def glob(self, path: str, pattern: str) -> list[str]:
+    async def glob(
+        self,
+        path: str,
+        pattern: str,
+        recursive: bool = False
+    ) -> list[str]:
         """Return virtual paths under ``path`` matching ``pattern``.
 
         ``*`` / ``?`` / ``[...]`` match within one path segment; ``**``
-        matches any number of segments.  Results are full virtual paths
-        relative to the workspace root.
+        matches any number of segments.  With ``recursive=True`` the pattern
+        is applied below ``path`` at any depth.  Results are full virtual
+        paths relative to the workspace root.
         """
-        return await self._match_paths(path, pattern)
-
-    async def rglob(self, path: str, pattern: str) -> list[str]:
-        """Recursively match ``pattern`` below ``path``."""
         if not pattern.strip("/"):
             raise ValueError("pattern must not be empty")
-        return await self._match_paths(path, f"**/{pattern.lstrip('/')}")
-
-    async def rlist(self, path: str) -> list[str]:
-        """Return all descendant virtual paths below ``path``."""
-        return await self._match_paths(path, "**")
+        if recursive:
+            pattern = f"**/{pattern.lstrip('/')}"
+        return await self._match_paths(path, pattern)
 
     async def read(self, path: str) -> bytes:
         node = await self._find_node(path)
@@ -459,13 +459,13 @@ class FileManager:
                 self._file_path(file_id).unlink(missing_ok=True)
         return len(file_ids), dir_count
 
-    async def list_dir(self, path: str) -> list[str]:
-        node = await self._find_node(path)
-        if node is None:
-            raise FileNotFoundError(f"Directory {path} not found")
-        if not is_dir(node):
-            raise NotADirectoryError(f"{path} is not a directory")
-        return list(node.sub_items.keys())
+    async def list_dir(
+        self,
+        path: str,
+        recursive: bool = False
+    ) -> list[str]:
+        """List direct child paths, or all descendants with ``recursive=True``."""
+        return await self._match_paths(path, "**" if recursive else "*")
 
     async def get_info(self, path: str) -> os.stat_result:
         node = await self._find_node(path)
