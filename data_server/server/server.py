@@ -40,6 +40,10 @@ class ResourceServer:
         async def directory_not_empty_handler(request: Request, exc: DirectoryNotEmptyError):
             return JSONResponse({"detail": str(exc)}, status_code=409)
 
+        @app.exception_handler(FileExistsError)
+        async def file_exists_handler(request: Request, exc: FileExistsError):
+            return JSONResponse({"detail": str(exc)}, status_code=409)
+
         @app.exception_handler(PermissionError)
         async def permission_error_handler(request: Request, exc: PermissionError):
             return JSONResponse({"detail": str(exc)}, status_code=403)

@@ -373,6 +373,273 @@ class FileManager:
             pattern = f"**/{pattern.lstrip('/')}"
         return await self._match_paths(path, pattern)
 
+    @staticmethod
+    def _path_parts(path: str) -> list[str]:
+        """Split a virtual path into non-empty segments."""
+        return [part for part in path.split("/") if part]
+
+    def _find_parent_locked(
+        self,
+        parts: list[str],
+        path: str
+    ) -> DirNode:
+        """Find the parent directory of ``parts``; caller holds the index lock."""
+        parent: DirNode = self.root_node
+        for part in parts[:-1]:
+            child = parent.sub_items.get(part)
+            if child is None:
+                raise FileNotFoundError(f"File {path} not found")
+            if not is_dir(child):
+                raise NotADirectoryError(f"{path} is not a directory")
+            parent = child
+        return parent
+
+    def _ensure_dir_locked(
+        self,
+        parts: list[str],
+        path: str
+    ) -> DirNode:
+        """Create missing directories and return the final one."""
+        node: DirNode = self.root_node
+        for part in parts:
+            child = node.sub_items.get(part)
+            if child is None:
+                child = DirNode(sub_items = {})
+                node.sub_items[part] = child
+            elif not is_dir(child):
+                raise NotADirectoryError(f"{path} is not a directory")
+            node = child
+        return node
+
+    def _resolve_existing_dir_locked(
+        self,
+        parts: list[str],
+        path: str
+    ) -> tuple[DirNode, list[str]]:
+        """Resolve the longest existing prefix and return the missing suffix."""
+        node: DirNode = self.root_node
+        for index, part in enumerate(parts):
+            child = node.sub_items.get(part)
+            if child is None:
+                return node, parts[index:]
+            if not is_dir(child):
+                raise NotADirectoryError(f"{path} is not a directory")
+            node = child
+        return node, []
+
+    def _clone_tree(
+        self,
+        node: Nodes,
+        root_name: str | None = None
+    ) -> tuple[Nodes, list[tuple[uuid.UUID, uuid.UUID]], int]:
+        """Clone a node tree with fresh file ids.
+
+        Returns the clone, ``(old_file_id, new_file_id)`` pairs and the number
+        of cloned directories (including the root directory).
+        """
+        if is_file(node):
+            new_id = self._gen_file_id()
+            clone = FileNode(
+                name = root_name or node.name,
+                id = new_id
+            )
+            return clone, [(node.id, new_id)], 0
+
+        copied_dirs = 1
+        pairs: list[tuple[uuid.UUID, uuid.UUID]] = []
+        sub_items: dict[str, Nodes] = {}
+        for name, child in node.sub_items.items():
+            cloned_child, child_pairs, child_dirs = self._clone_tree(child)
+            sub_items[name] = cloned_child
+            pairs.extend(child_pairs)
+            copied_dirs += child_dirs
+
+        return DirNode(sub_items = sub_items), pairs, copied_dirs
+
+    async def _copy_payloads(
+        self,
+        pairs: list[tuple[uuid.UUID, uuid.UUID]]
+    ) -> None:
+        """Copy every source payload to its freshly allocated file id."""
+        created_paths: list[Path] = []
+        try:
+            async with self._file_lock:
+                for source_id, target_id in pairs:
+                    source_path = self._file_path(source_id)
+                    if not source_path.exists():
+                        raise FileNotFoundError(
+                            f"Data file {source_id} not found"
+                        )
+
+                    target_path = self._file_path(target_id)
+                    target_path.parent.mkdir(parents = True, exist_ok = True)
+                    created_paths.append(target_path)
+                    async with aiofiles.open(source_path, "rb") as source_file:
+                        async with aiofiles.open(target_path, "wb") as target_file:
+                            await self._copy_range(source_file, target_file)
+        except Exception:
+            # The index was not touched yet; remove partially copied payloads.
+            async with self._file_lock:
+                for path in created_paths:
+                    path.unlink(missing_ok = True)
+            raise
+
+    async def mkdir(self, path: str) -> str:
+        """Create a directory, including missing parents.
+
+        :return: the normalized virtual path
+        :raises FileExistsError: if the target itself already exists
+        :raises NotADirectoryError: if an existing parent is a file
+        """
+        parts = self._path_parts(path)
+        if not parts:
+            raise PermissionError("Cannot create the root directory")
+
+        normalized = "/".join(parts)
+        async with self._index_lock:
+            parent, missing_parts = self._resolve_existing_dir_locked(
+                parts[:-1],
+                path
+            )
+            name = parts[-1]
+            if not missing_parts and name in parent.sub_items:
+                raise FileExistsError(f"{normalized} already exists")
+
+            for part in missing_parts:
+                child = DirNode(sub_items = {})
+                parent.sub_items[part] = child
+                parent = child
+            parent.sub_items[name] = DirNode(sub_items = {})
+            await self._write_index_locked()
+
+        return normalized
+
+    async def move(
+        self,
+        path: str,
+        destination: str
+    ) -> tuple[str, str]:
+        """Move a file or directory inside the workspace.
+
+        Moving to the same path is a no-op.  Moving to a different name in the
+        same directory is a rename.  File ids and payloads are never changed.
+
+        :return: ``(source, destination)`` normalized virtual paths
+        """
+        source_parts = self._path_parts(path)
+        destination_parts = self._path_parts(destination)
+        if not source_parts:
+            raise PermissionError("Cannot move the root directory")
+        if not destination_parts:
+            raise PermissionError("Destination must not be empty")
+
+        source = "/".join(source_parts)
+        target = "/".join(destination_parts)
+
+        async with self._index_lock:
+            source_parent = self._find_parent_locked(source_parts, source)
+            source_name = source_parts[-1]
+            node = source_parent.sub_items.get(source_name)
+            if node is None:
+                raise FileNotFoundError(f"File {source} not found")
+
+            if destination_parts == source_parts:
+                return source, target
+
+            if (
+                is_dir(node)
+                and len(destination_parts) > len(source_parts)
+                and destination_parts[:len(source_parts)] == source_parts
+            ):
+                raise PermissionError(
+                    f"Cannot move {source} into its own subtree"
+                )
+
+            destination_parent = self._ensure_dir_locked(
+                destination_parts[:-1],
+                target
+            )
+            destination_name = destination_parts[-1]
+            if destination_name in destination_parent.sub_items:
+                raise FileExistsError(f"{target} already exists")
+
+            del source_parent.sub_items[source_name]
+            if is_file(node):
+                node.name = destination_name
+            destination_parent.sub_items[destination_name] = node
+            await self._write_index_locked()
+
+        return source, target
+
+    async def copy(
+        self,
+        path: str,
+        destination: str
+    ) -> tuple[str, str, int, int]:
+        """Copy a file or directory to a new location.
+
+        Every file gets a new id and a new payload file; the source is not
+        modified.
+
+        :return: ``(source, destination, copied_files, copied_dirs)``
+        """
+        source_parts = self._path_parts(path)
+        destination_parts = self._path_parts(destination)
+        if not source_parts:
+            raise PermissionError("Cannot copy the root directory")
+        if not destination_parts:
+            raise PermissionError("Destination must not be empty")
+
+        source = "/".join(source_parts)
+        target = "/".join(destination_parts)
+
+        async with self._index_lock:
+            source_parent = self._find_parent_locked(source_parts, source)
+            source_name = source_parts[-1]
+            node = source_parent.sub_items.get(source_name)
+            if node is None:
+                raise FileNotFoundError(f"File {source} not found")
+
+            if destination_parts == source_parts:
+                raise FileExistsError(f"{target} already exists")
+
+            if (
+                is_dir(node)
+                and len(destination_parts) > len(source_parts)
+                and destination_parts[:len(source_parts)] == source_parts
+            ):
+                raise PermissionError(
+                    f"Cannot copy {source} into its own subtree"
+                )
+
+            destination_parent, missing_parts = (
+                self._resolve_existing_dir_locked(
+                    destination_parts[:-1],
+                    target
+                )
+            )
+            destination_name = destination_parts[-1]
+            if (
+                not missing_parts
+                and destination_name in destination_parent.sub_items
+            ):
+                raise FileExistsError(f"{target} already exists")
+
+            root_name = destination_name if is_file(node) else None
+            clone, pairs, copied_dirs = self._clone_tree(node, root_name)
+
+            # Copy payloads first; if this fails the index stays untouched.
+            await self._copy_payloads(pairs)
+
+            for part in missing_parts:
+                child = DirNode(sub_items = {})
+                destination_parent.sub_items[part] = child
+                destination_parent = child
+            destination_parent.sub_items[destination_name] = clone
+            await self._write_index_locked()
+
+        return source, target, len(pairs), copied_dirs
+
     async def read(self, path: str) -> bytes:
         node = await self._find_node(path)
         if node is None:

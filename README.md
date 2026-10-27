@@ -10,6 +10,9 @@
 - 📁 **安全文件名** — 文件名仅存在于索引中，不会作为文件名落盘
 - 📂 **虚拟目录** — 特殊目录结构不会触发文件系统的特殊行为
 - ✍️ **写入即创建** — 目标不存在时自动创建节点和中间目录
+- 🗂️ **空目录创建** — `mkdir` 直接生成空目录并自动补齐中间目录
+- 🚚 **移动 / 重命名** — `move` 只改索引位置，文件 ID 与数据文件不变
+- 📑 **复制** — `copy` 复制目录树，并为每个文件分配新 ID、复制 payload
 - 🗑️ **删除** — 支持删除文件、空目录或递归删除整个目录
 - 🔎 **存在检查** — 不读取内容即可判断路径是文件、目录还是不存在
 - 🔍 **路径扫描** — `glob`（`recursive=true` 递归）按模式返回完整虚拟路径
@@ -256,6 +259,99 @@ curl -G --data-urlencode "pattern=.*\\.md$" \
 
 新建节点时会把索引写回 `index.json`；写入的数据在重启服务后仍可读取。
 
+### `POST /operations/mkdir/{path}`
+
+创建空目录，自动创建缺失的中间目录；不需要先写文件，请求体为空。
+
+| 参数 | 位置 | 说明 |
+| --- | --- | --- |
+| `path` | path | 虚拟目录路径 |
+
+| 情况 | 状态码 | 响应 |
+| --- | --- | --- |
+| 创建成功 | 200 | `{"path": "<normalized path>"}` |
+| 目标已存在（文件或目录） | 409 | `{"detail": "<path> already exists"}` |
+| 已存在的中间路径是文件 | 400 | `{"detail": "<path> is not a directory"}` |
+| 路径为空 / 根目录 | 403 | `{"detail": "Cannot create the root directory"}` |
+
+```bash
+curl -X POST http://127.0.0.1:8000/operations/mkdir/docs/empty/sub
+# {"path": "docs/empty/sub"}
+```
+
+### `POST /operations/move/{path}`
+
+移动文件或目录，请求体是 JSON：
+
+```json
+{
+  "destination": "archive/docs"
+}
+```
+
+只移动索引节点，**文件 ID 和 payload 文件都不变**；同一父目录下换名字就是重命名。
+目标等于源路径时是 no-op。
+
+| 参数 | 位置 | 说明 |
+| --- | --- | --- |
+| `path` | path | 要移动的虚拟路径 |
+| `destination` | body | JSON 字段，目标虚拟路径 |
+
+| 情况 | 状态码 | 响应 |
+| --- | --- | --- |
+| 移动成功 / 原地重命名 | 200 | `{"source": "<source>", "destination": "<destination>"}` |
+| 源路径不存在 | 404 | `{"detail": "File <source> not found"}` |
+| 目标已存在 | 409 | `{"detail": "<destination> already exists"}` |
+| 移动根目录，或把目录移进自己的子树 | 403 | `{"detail": "..."}` |
+| 目标的父路径是文件 | 400 | `{"detail": "<path> is not a directory"}` |
+| 缺少 `destination` | 422 | FastAPI 标准校验错误 |
+
+目标父目录不存在时会自动创建。
+
+```bash
+curl -X POST http://127.0.0.1:8000/operations/move/docs/a.md \
+    -H "Content-Type: application/json" \
+    -d '{"destination": "archive/a.md"}'
+# {"source": "docs/a.md", "destination": "archive/a.md"}
+```
+
+### `POST /operations/copy/{path}`
+
+复制文件或目录，请求体是 JSON：
+
+```json
+{
+  "destination": "backup/docs"
+}
+```
+
+目录树会递归克隆；每个文件都会分配新的 UUID，并把内容复制到新的数据文件。
+源节点和源 payload 不会被修改。
+
+| 参数 | 位置 | 说明 |
+| --- | --- | --- |
+| `path` | path | 要复制的虚拟路径 |
+| `destination` | body | JSON 字段，目标虚拟路径 |
+
+| 情况 | 状态码 | 响应 |
+| --- | --- | --- |
+| 复制成功 | 200 | `{"source": "<source>", "destination": "<destination>", "copied_files": 3, "copied_dirs": 2}` |
+| 源路径不存在 | 404 | `{"detail": "File <source> not found"}` |
+| 目标已存在，或复制到自身 | 409 | `{"detail": "<destination> already exists"}` |
+| 复制根目录，或把目录复制进自己的子树 | 403 | `{"detail": "..."}` |
+| 目标的父路径是文件 | 400 | `{"detail": "<path> is not a directory"}` |
+| 缺少 `destination` | 422 | FastAPI 标准校验错误 |
+
+`copied_dirs` 包含被复制的根目录本身；复制单个文件时 `copied_dirs` 为 0。
+目标父目录不存在时会自动创建。
+
+```bash
+curl -X POST http://127.0.0.1:8000/operations/copy/docs \
+    -H "Content-Type: application/json" \
+    -d '{"destination": "backup/docs"}'
+# {"source": "docs", "destination": "backup/docs", "copied_files": 3, "copied_dirs": 2}
+```
+
 ### `DELETE /operations/delete/{path}`
 
 删除文件或目录。
@@ -316,6 +412,19 @@ curl -G --data-urlencode "pattern=.*\\.md$" \
 # 上传（目标不存在会自动创建）
 curl -X POST -F "file=@photo.jpg" \
     http://127.0.0.1:8000/operations/write/images/photo.jpg
+
+# 创建空目录（自动补齐中间目录）
+curl -X POST http://127.0.0.1:8000/operations/mkdir/docs/empty
+
+# 移动 / 原地重命名
+curl -X POST http://127.0.0.1:8000/operations/move/docs/a.md \
+    -H "Content-Type: application/json" \
+    -d '{"destination": "archive/a.md"}'
+
+# 复制目录树（新文件 ID + 新 payload）
+curl -X POST http://127.0.0.1:8000/operations/copy/docs \
+    -H "Content-Type: application/json" \
+    -d '{"destination": "backup/docs"}'
 
 # 删除文件
 curl -X DELETE http://127.0.0.1:8000/operations/delete/images/photo.jpg
