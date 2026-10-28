@@ -10,6 +10,7 @@
 - 📁 **安全文件名** — 文件名仅存在于索引中，不会作为文件名落盘
 - 📂 **虚拟目录** — 特殊目录结构不会触发文件系统的特殊行为
 - ✍️ **写入即创建** — 目标不存在时自动创建节点和中间目录
+- 🎯 **字节寻址** — `read` 支持 `Range` 请求头，按字节区间返回 `206`
 - 🗂️ **空目录创建** — `mkdir` 直接生成空目录并自动补齐中间目录
 - 🚚 **移动 / 重命名** — `move` 只改索引位置，文件 ID 与数据文件不变
 - 📑 **复制** — `copy` 复制目录树，并为每个文件分配新 ID、复制 payload
@@ -124,14 +125,26 @@ or
 | --- | --- | --- |
 | `path` | path | 虚拟文件路径，例如 `images/photo.jpg` |
 | `text_encoding` | query | 可选，指定编码后以文本返回，例如 `utf-8` |
+| `Range` | header | 可选，标准字节区间，例如 `bytes=0-1023`、`bytes=1024-`、`bytes=-512` |
 
 | 情况 | 状态码 | 响应 |
 | --- | --- | --- |
 | 普通文件 | 200 | 原始字节，`Content-Type: application/octet-stream` |
-| 指定 `text_encoding` | 200 | 解码后的文本，`Content-Type: text/plain; charset=utf-8` |
+| 带合法 `Range` | 206 | 区间字节，`Content-Range: bytes <start>-<end>/<size>` |
+| 指定 `text_encoding` | 200 / 206 | 解码后的文本，`Content-Type: text/plain` |
+| `Range` 非法或超出文件末尾 | 416 | `{"detail": "Range Not Satisfiable"}`，带 `Content-Range: bytes */<size>` |
 | `text_encoding` 无效或编解码器不存在 | 400 | `{"detail": "Invalid text encoding"}` |
 | 路径不存在 | 404 | `{"detail": "File <path> not found"}` |
 | 路径是目录 | 400 | `{"detail": "<path> is a directory"}` |
+
+成功响应都带 `Accept-Ranges: bytes`。`Range` 作用于原始字节；如果同时指定
+`text_encoding`，只解码选区，选区截断多字节字符时返回 400。
+
+```bash
+curl -H "Range: bytes=0-1023" \
+    http://127.0.0.1:8000/operations/read/images/photo.jpg \
+    --output first-1k.bin
+```
 
 ### `GET /operations/list/{path}`
 
@@ -383,6 +396,11 @@ curl -X POST http://127.0.0.1:8000/operations/copy/docs \
 ```bash
 # 读取图片
 curl http://127.0.0.1:8000/operations/read/images/photo.jpg -o photo.jpg
+
+# 按字节区间读取前 1 KiB
+curl -H "Range: bytes=0-1023" \
+    http://127.0.0.1:8000/operations/read/images/photo.jpg \
+    --output first-1k.bin
 
 # 以文本读取
 curl "http://127.0.0.1:8000/operations/read/README.md?text_encoding=utf-8"

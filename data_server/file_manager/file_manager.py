@@ -640,14 +640,37 @@ class FileManager:
 
         return source, target, len(pairs), copied_dirs
 
-    async def read(self, path: str) -> bytes:
+    async def read(
+        self,
+        path: str,
+        start: int = 0,
+        length: int | None = None
+    ) -> bytes:
+        """Read all bytes, or a byte range, from a file.
+
+        ``start`` is zero-based; ``length=None`` reads to EOF.
+        """
+        if start < 0:
+            raise ValueError("start must not be negative")
+        if length is not None and length < 0:
+            raise ValueError("length must not be negative")
+
         node = await self._find_node(path)
         if node is None:
             raise FileNotFoundError(f"File {path} not found")
         elif not is_file(node):
             raise IsADirectoryError(f"{path} is a directory")
         else:
-            return await self._read_file(node.id)
+            async with self._file_lock:
+                file_path = self._file_path(node.id)
+                if not file_path.exists():
+                    raise FileNotFoundError(f"Data file {node.id} not found")
+                async with aiofiles.open(file_path, "rb") as file:
+                    if start:
+                        await file.seek(start)
+                    if length is None:
+                        return await file.read()
+                    return await file.read(length)
 
     async def write(self, path: str, data: bytes) -> int:
         node = await self._find_node(path)
